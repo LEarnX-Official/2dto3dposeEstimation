@@ -21,6 +21,7 @@ from common.loss import mpjpe, p_mpjpe
 from network.GraFormer import GraFormer, adj_mx_from_edges
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation
 
 src_mask = torch.tensor([[[True, True, True, True, True, True, True, True, True, True,
@@ -33,7 +34,7 @@ def parse_args():
     # General arguments
     parser.add_argument('-d', '--dataset', default='h36m', type=str, metavar='NAME', help='target dataset')
     parser.add_argument('-k', '--keypoints', default='gt', type=str, metavar='NAME', help='2D detections to use')
-    parser.add_argument('-a', '--actions', default='*', type=str, metavar='LIST',
+    parser.add_argument('-a', '--actions', default='Directions', type=str, metavar='LIST',
                         help='actions to train/test on, separated by comma, or * for all')
     parser.add_argument('--evaluate', default='', type=str, metavar='FILENAME',
                         help='checkpoint to evaluate (file name)')
@@ -70,39 +71,81 @@ def parse_args():
     return args
 
 
-def visualize_predictions(predictions, ground_truth, actions, output_path='visualization.mp4'):
+
+def visualize_predictions(predictions: np.ndarray, ground_truth: np.ndarray, actions: list, output_path: str = 'visualization.mp4'):
     """Visualize 3D poses and save as video"""
 
+    # Define edges representing the connections between joints
+    edges = [(0, 1), (1, 2), (2, 3),
+             (0, 4), (4, 5), (5, 6),
+             (0, 7), (7, 8), (8, 9),
+             (8, 10), (10, 11), (11, 12),
+             (8, 13), (13, 14), (14, 15)]
+
     # Create a figure and 3D axis
-    fig = plt.figure()
+    fig = plt.figure(figsize=(10, 7))
     ax = fig.add_subplot(111, projection='3d')
 
-    # Animation function
+    def set_axes_equal(ax):
+        """Set 3D plot axes to have equal scale."""
+        x_limits = ax.get_xlim3d()
+        y_limits = ax.get_ylim3d()
+        z_limits = ax.get_zlim3d()
+
+        x_range = x_limits[1] - x_limits[0]
+        y_range = y_limits[1] - y_limits[0]
+        z_range = z_limits[1] - z_limits[0]
+
+        max_range = max(x_range, y_range, z_range)
+        x_center = (x_limits[1] + x_limits[0]) / 2
+        y_center = (y_limits[1] + y_limits[0]) / 2
+        z_center = (z_limits[1] + z_limits[0]) / 2
+
+        ax.set_xlim([x_center - max_range / 2, x_center + max_range / 2])
+        ax.set_ylim([y_center - max_range / 2, y_center + max_range / 2])
+        ax.set_zlim([z_center - max_range / 2, z_center + max_range / 2])
+
     def update(frame):
-        ax.clear()
-        ax.set_xlim([-1, 1])
-        ax.set_ylim([-1, 1])
-        ax.set_zlim([-1, 1])
-        ax.set_title(f'Frame: {frame}')
+        ax.cla()  # Clear the axis
+        ax.set_title(f'Frame: {frame}, Action: {actions[frame]}')
+        ax.set_xlabel('X (Left/Right)')
+        ax.set_ylabel('Y (Front/Back)')
+        ax.set_zlabel('Z (Up/Down)')
 
         # Plot ground truth
         gt = ground_truth[frame]
         ax.scatter(gt[:, 0], gt[:, 1], gt[:, 2], c='b', label='Ground Truth')
+        for start, end in edges:
+            ax.plot([gt[start, 0], gt[end, 0]], [gt[start, 1], gt[end, 1]], [gt[start, 2], gt[end, 2]], 'b')
 
         # Plot predictions
         pred = predictions[frame]
         ax.scatter(pred[:, 0], pred[:, 1], pred[:, 2], c='r', label='Prediction')
+        for start, end in edges:
+            ax.plot([pred[start, 0], pred[end, 0]], [pred[start, 1], pred[end, 1]], [pred[start, 2], pred[end, 2]], 'r')
 
-        # Draw the legend
-        ax.legend()
+        # Ensure equal scaling
+        set_axes_equal(ax)
+        ax.legend(loc='upper right')
+
+        # Adjust view to show skeleton from a conventional perspective
+        ax.view_init(elev=30, azim=210)  # Adjust view to a more intuitive angle
+
+    # Check for valid number of frames
+    if len(predictions) == 0 or len(ground_truth) == 0:
+        raise ValueError("Predictions or ground truth arrays are empty.")
 
     # Create an animation
     ani = FuncAnimation(fig, update, frames=len(predictions), repeat=False)
 
     # Save the animation
-    ani.save(output_path, writer='ffmpeg', fps=10)
+    try:
+        ani.save(output_path, writer='ffmpeg', fps=60)
+        print(f"Visualization saved to {output_path}")
+    except Exception as e:
+        print(f"Error saving visualization: {e}")
+
     plt.close(fig)
-    print(f"Visualization saved to {output_path}")
 
 
 def main(args):
@@ -126,7 +169,7 @@ def main(args):
 
     action_filter = None if args.actions == '*' else args.actions.split(',')
     if action_filter is not None:
-        action_filter = map(lambda x: dataset.define_actions(x)[0], action_filter)
+        action_filter = list(map(lambda x: dataset.define_actions(x)[0], action_filter))  # Convert map to list
         print('==> Selected actions: {}'.format(action_filter))
 
     stride = args.downsample
@@ -202,6 +245,7 @@ def main(args):
         print('Protocol #1   (MPJPE) action-wise average: {:.2f} (mm)'.format(np.mean(errors_p1).item()))
         print('Protocol #2 (P-MPJPE) action-wise average: {:.2f} (mm)'.format(np.mean(errors_p2).item()))
         exit(0)
+
 
     poses_train, poses_train_2d, actions_train = fetch(subjects_train, dataset, keypoints, action_filter, stride)
     train_loader = DataLoader(PoseGenerator(poses_train, poses_train_2d, actions_train), batch_size=args.batch_size,
